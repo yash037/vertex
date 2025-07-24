@@ -1,6 +1,6 @@
 #include <iostream>
-#include "../include/RedisServer.h"
-#include "../include/RedisDatabase.h"
+#include "../include/Server.h"
+#include "../include/Database.h"
 #include <thread>
 #include <chrono>
 
@@ -8,7 +8,7 @@
 void persistDatabase() {
     while(true){
         std::this_thread::sleep_for(std::chrono::seconds(300));
-        if(!RedisDatabase::getInstance().dump("dump.my_rcb")){
+        if(!Database::getInstance().dump("dump.my_rcb")){
             std::cerr<<"error dumping database\n";
         }
         else{
@@ -28,14 +28,14 @@ int main(int argc, char *argv[]){
 
 
     //singleton pattern trololo
-    if(RedisDatabase::getInstance().load("dump.my_rdb")){
+    if(Database::getInstance().load("dump.my_rdb")){
         std::cout<<"database loaded from dump.my_rdb\n";
     }
     else{
         std::cout<<"no dump file found database not loaded \n";
     }
 
-    RedisServer server(port);
+    Server server(port);
 
     //dump database every 180 seconds
     std::thread persistanceThread(persistDatabase);

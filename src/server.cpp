@@ -1,78 +1,116 @@
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
-#include <errno.h>
-#include <unistd.h>
-#include <arpa/inet.h>
+#include "../include/Server.h"
+#include "../include/CommandHandler.h"
+#include "../include/Database.h"
+#include <iostream>
 #include <sys/socket.h>
-#include <netinet/ip.h>
+#include <unistd.h>
+#include <netinet/in.h>
+#include <vector>
+#include <thread>
+#include <cstring>
+#include <signal.h>
 
 
-static void msg(const char *msg) {
-    fprintf(stderr, "%s\n", msg);
+//created global pointer (signal handling)
+static Server* globalServer = nullptr;
+
+void signalHandler(int signum){
+    if(globalServer){
+        std::cout<<"\n came signal "<<signum<<", shutting down.. \n";
+        globalServer->shutdown();
+    }
+    //returning signum integer to os after exit obv not exit(0)
+    exit(signum);
 }
 
-static void die(const char *msg) {
-    int err = errno;
-    fprintf(stderr, "[%d] %s\n", err, msg);
-    abort();
+void Server::setupSignalHandler() {
+    signal(SIGINT, signalHandler);
+}
+Server::Server(int port) : port(port), server_socket(-1), running(true){
+    globalServer = this;
+    setupSignalHandler();
 }
 
-static void do_something(int connfd) {
-    char rbuf[64] = {};
-    ssize_t n = read(connfd, rbuf, sizeof(rbuf) - 1);
-    if (n < 0) {
-        msg("read() error");
+void Server::shutdown(){
+    //socket server shutdown
+    running = false; //atomic op
+    if(server_socket != -1){
+        //persisting database
+        if(Database::getInstance().dump("dump.my_rdb")){
+            std::cout<<"persistance process success \n";
+        }
+        else{
+            std::cerr<<"Error dumping database \n";
+        }
+        close(server_socket); //close sys call
+    }
+    std::cout<<"server shutdown complete \n";
+}
+
+void Server::run(){
+    server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if(server_socket < 0){
+        std::cerr<<"can not create socket \n";
         return;
     }
-    fprintf(stderr, "client says: %s\n", rbuf);
 
-    char wbuf[] = "world";
-    ssize_t wn = write(connfd, wbuf, strlen(wbuf));
-    if (wn < 0) {
-        msg("write() error");
-    }
-}
+    int opt = 1; //option level for tcp protocol going to be used in socket
+    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-int main() {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        die("socket()");
-    }
+    sockaddr_in serverAddr{}; //sockaddr_in struct instance for socket config
+    
+    serverAddr.sin_family = AF_INET; //ipv4
+    serverAddr.sin_port = htons(port); //convert to network system
+    serverAddr.sin_addr.s_addr = INADDR_ANY; //can accept from any ip 
 
-    // this is needed for most server applications
-    int val = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
-
-    // bind
-    struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_port = ntohs(1234);
-    addr.sin_addr.s_addr = ntohl(0);    // wildcard address 0.0.0.0
-    int rv = bind(fd, (const struct sockaddr *)&addr, sizeof(addr));
-    if (rv) {
-        die("bind()");
+    if(bind(server_socket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0){
+        std::cerr<<"socket bind failed in server \n";
+        return;
     }
 
-    // listen
-    rv = listen(fd, SOMAXCONN);
-    if (rv) {
-        die("listen()");
+    //max pending connections -> 10
+    //making socket passive -> later on accept sys call
+    //clien::connect() and server::accept() connection between these sates are backlog thats why set 10
+    if(listen(server_socket, 10) < 0){
+        std::cerr<<"server listen errror \n";
+        return;
     }
 
-    while (true) {
-        // accept
-        struct sockaddr_in client_addr = {};
-        socklen_t addrlen = sizeof(client_addr);
-        int connfd = accept(fd, (struct sockaddr *)&client_addr, &addrlen);
-        if (connfd < 0) {
-            continue;   // error
+    std::cout<<" server listening on port "<<port<<"\n";
+
+    std::vector<std::thread> threads;
+    CommandHandler cmdHandler; //implement later 
+
+    while (running) {
+        int client_socket = accept(server_socket, nullptr, nullptr);
+        if (client_socket < 0) {
+            if (running) 
+                std::cerr << "Error Accepting Client Connection\n";
+            break;
         }
 
-        do_something(connfd);
-        close(connfd);
+        //setup a beautiful thread lol for this shit
+        threads.emplace_back([client_socket, &cmdHandler](){
+            char buffer[1024]; //buffer to recv client msg
+            while (true) {
+                memset(buffer, 0, sizeof(buffer)); //set buffer memory block to 0
+                int bytes = recv(client_socket, buffer, sizeof(buffer) - 1, 0); //recv sys call
+                if (bytes <= 0) break; //if recv return bytes count <= 0
+                std::string request(buffer, bytes); //might read garbage in string request thats why bytes must be specified
+                std::string response = cmdHandler.processCommand(request);
+                send(client_socket, response.c_str(), response.size(), 0);
+            }
+            close(client_socket);
+        });
+    }
+    
+    for (auto& t : threads) {
+        if (t.joinable()) t.join();
     }
 
-    return 0;
+    // Before shutdown, persist the database
+    if (Database::getInstance().dump("dump.my_rdb"))
+        std::cout << "Database Dumped to dump.my_rdb\n";
+    else 
+        std::cerr << "Error dumping database\n";
 }
